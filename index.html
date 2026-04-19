@@ -89,6 +89,16 @@ tr:hover td{background:var(--surface2)}
 .hc-pnl.neg{background:var(--red-bg);color:var(--red)}
 
 .section-note{font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;margin-bottom:16px;padding:10px 13px;background:var(--surface2);border-radius:var(--radius);border:0.5px solid var(--border)}
+.btn-refresh{display:inline-flex;align-items:center;gap:7px;padding:8px 16px;border-radius:var(--radius);border:0.5px solid var(--accent);background:transparent;color:var(--accent);font-family:'DM Mono',monospace;font-size:12px;cursor:pointer;transition:all 0.15s;margin-bottom:16px}
+.btn-refresh:hover{background:var(--blue-bg)}
+.btn-refresh:disabled{opacity:0.4;cursor:not-allowed}
+.btn-refresh .spin{display:inline-block;animation:spin 1s linear infinite}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+.price-live{font-size:11px;color:var(--green);font-family:'DM Mono',monospace;margin-top:2px}
+.price-err{font-size:11px;color:var(--red);font-family:'DM Mono',monospace;margin-top:2px}
+.hc-change{}
+.change-pos{color:var(--green)}
+.change-neg{color:var(--red)}
 
 .toast{position:fixed;bottom:28px;right:28px;background:var(--surface3);border:0.5px solid var(--border2);border-radius:var(--radius);padding:11px 20px;font-size:13px;font-family:'DM Mono',monospace;color:var(--text);opacity:0;transform:translateY(10px);transition:all 0.25s;pointer-events:none;z-index:999;box-shadow:0 8px 32px rgba(0,0,0,0.4)}
 .toast.show{opacity:1;transform:translateY(0)}
@@ -164,7 +174,13 @@ tr:hover td{background:var(--surface2)}
       <div class="panel-toggle" id="holdings-toggle">▾</div>
     </div>
     <div class="panel-body" id="holdings-body">
-      <div class="section-note">💡 在各卡片輸入現價，即可即時計算未實現損益</div>
+      <div class="section-note">💡 點「自動抓取現價」可從 Yahoo Finance 取得最新報價（台股代號會自動加 .TW）</div>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+        <button class="btn-refresh" id="refresh-btn" onclick="fetchAllPrices()">
+          <span id="refresh-icon">↻</span> 自動抓取現價
+        </button>
+        <span id="last-updated" style="font-size:11px;color:var(--text3);font-family:'DM Mono',monospace"></span>
+      </div>
       <div class="holdings-grid" id="holdings-grid"><div class="empty">尚無持倉資料</div></div>
     </div>
   </div>
@@ -311,28 +327,149 @@ function render(){
   renderLog();
 }
 
+// ── API Key 管理 ──
+const APIKEY_STORAGE = 'stocklog_finnhub_key';
+let FINNHUB_KEY = localStorage.getItem(APIKEY_STORAGE) || '';
+
+function saveApiKey(){
+  const val = document.getElementById('apikey-input').value.trim();
+  if(!val){ showToast('⚠ 請輸入 API Key'); return; }
+  FINNHUB_KEY = val;
+  localStorage.setItem(APIKEY_STORAGE, val);
+  updateApiKeyUI();
+  showToast('✓ API Key 已儲存');
+}
+
+function updateApiKeyUI(){
+  const setup = document.getElementById('apikey-setup');
+  const status = document.getElementById('apikey-status');
+  const input = document.getElementById('apikey-input');
+  if(FINNHUB_KEY){
+    input.value = FINNHUB_KEY.slice(0,8) + '••••••••••••••••';
+    status.textContent = '✓ 已設定 API Key，可以抓取現價';
+    status.style.color = 'var(--green)';
+  } else {
+    status.textContent = '尚未設定 API Key';
+    status.style.color = 'var(--text3)';
+  }
+}
+
+// ── Finnhub ticker 轉換（台股加 TWSE: 前綴）──
+function toFinnhubSym(sym){
+  if(/^\d/.test(sym)) return 'TWSE:' + sym;   // 台股：2330 → TWSE:2330
+  return sym;                                    // 美股：NVDA, GOOG 直接用
+}
+
+// ── 抓單一股票現價（Finnhub REST API，支援瀏覽器 CORS）──
+async function fetchPrice(sym){
+  if(!FINNHUB_KEY) throw new Error('no_key');
+  const fsym = toFinnhubSym(sym);
+  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(fsym)}&token=${FINNHUB_KEY}`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error(`HTTP ${res.status}`);
+  const d = await res.json();
+  // d.c = current price, d.pc = previous close, d.d = change, d.dp = change%
+  if(!d.c || d.c === 0) throw new Error('no price');
+  return {
+    price: d.c,
+    change: d.d ?? (d.c - d.pc),
+    changePct: d.dp ?? 0,
+    currency: /^\d/.test(sym) ? 'TWD' : 'USD'
+  };
+}
+
+// ── 批次抓取所有持倉現價 ──
+async function fetchAllPrices(){
+  const {holdings} = computeHoldings();
+  if(!holdings.length) return;
+  if(!FINNHUB_KEY){
+    showToast('⚠ 請先設定 Finnhub API Key');
+    document.getElementById('apikey-input').focus();
+    return;
+  }
+  const btn = document.getElementById('refresh-btn');
+  const icon = document.getElementById('refresh-icon');
+  btn.disabled = true;
+  icon.textContent = '⟳';
+  icon.className = 'spin';
+  showToast('抓取報價中...');
+
+  const results = await Promise.allSettled(
+    holdings.map(h => fetchPrice(h.sym).then(r => ({sym: h.sym, ...r})))
+  );
+
+  let ok = 0, fail = 0;
+  results.forEach((r, i) => {
+    const sym = holdings[i].sym;
+    if(r.status === 'fulfilled'){
+      livePrices[sym] = r.value;
+      ok++;
+    } else {
+      livePriceErrors[sym] = true;
+      fail++;
+      console.warn(`抓取 ${sym} 失敗:`, r.reason?.message);
+    }
+  });
+
+  btn.disabled = false;
+  icon.textContent = '↻';
+  icon.className = '';
+  document.getElementById('last-updated').textContent =
+    `更新於 ${new Date().toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'})}`;
+  renderHoldings(holdings);
+  showToast(fail > 0 ? `✓ ${ok} 筆成功，${fail} 筆失敗` : `✓ 全部 ${ok} 筆報價更新完成`);
+}
+
+let livePrices = {};
+let livePriceErrors = {};
+
 function renderHoldings(holdings){
   const el=document.getElementById('holdings-grid');
   if(!holdings.length){el.innerHTML='<div class="empty">尚無持倉資料</div>';return;}
-  el.innerHTML=holdings.map(h=>`
+  el.innerHTML=holdings.map(h=>{
+    const live = livePrices[h.sym];
+    let priceDisplay = '';
+    let pnlDisplay = '';
+    if(live){
+      const pnl = (live.price - h.avgCost)*h.shares;
+      const pct = (live.price - h.avgCost)/h.avgCost*100;
+      const changeStr = (live.change>=0?'+':'')+live.change.toFixed(2)+' ('+fmtPct(live.changePct)+')';
+      priceDisplay = `
+        <div class="hc-row" style="margin-top:8px">
+          <span>現價</span>
+          <span style="color:var(--text);font-weight:600">${live.price.toLocaleString('zh-TW',{minimumFractionDigits:2,maximumFractionDigits:2})} <span style="font-size:10px;color:var(--text3)">${live.currency}</span></span>
+        </div>
+        <div class="hc-row">
+          <span>漲跌</span>
+          <span class="${live.change>=0?'change-pos':'change-neg'}">${changeStr}</span>
+        </div>`;
+      pnlDisplay = `<div class="hc-pnl ${pnl>=0?'pos':'neg'}">${fmt(pnl,0)} (${fmtPct(pct)})</div>`;
+    } else {
+      priceDisplay = `
+        <div class="hc-price-row" style="margin-top:8px">
+          <span>現價</span>
+          <input class="hc-price-input" type="number" id="cp_${h.sym}" placeholder="手動輸入" step="0.01" min="0"
+            oninput="updatePnl('${h.sym}',${h.shares},${h.avgCost})">
+        </div>`;
+      pnlDisplay = `<div class="hc-pnl" id="pnl_${h.sym}"></div>`;
+    }
+    return `
     <div class="holding-card">
       <div class="hc-symbol">${h.sym}</div>
       <div class="hc-name">${h.name||'—'}</div>
       <div class="hc-row"><span>持股數量</span><span>${h.shares.toLocaleString()} 股</span></div>
       <div class="hc-row"><span>均攤成本</span><span>${fmt(h.avgCost,2)}</span></div>
       <div class="hc-row"><span>成本總計</span><span>${fmt(h.totalCost,0)}</span></div>
-      <div class="hc-price-row">
-        <span>現價</span>
-        <input class="hc-price-input" type="number" id="cp_${h.sym}" placeholder="輸入現價" step="0.01" min="0"
-          oninput="updatePnl('${h.sym}',${h.shares},${h.avgCost})">
-      </div>
-      <div class="hc-pnl" id="pnl_${h.sym}"></div>
-    </div>`).join('');
+      ${priceDisplay}
+      ${pnlDisplay}
+    </div>`;
+  }).join('');
 }
 
 function updatePnl(sym,shares,avgCost){
-  const price=parseFloat(document.getElementById('cp_'+sym).value);
+  const price=parseFloat(document.getElementById('cp_'+sym)?.value);
   const el=document.getElementById('pnl_'+sym);
+  if(!el) return;
   if(!price||isNaN(price)){el.textContent='';el.className='hc-pnl';return;}
   const pnl=(price-avgCost)*shares;
   const pct=(price-avgCost)/avgCost*100;
@@ -378,6 +515,7 @@ function showToast(msg){
 
 // ── 啟動 ──
 init();
+updateApiKeyUI();
 </script>
 </body>
 </html>
