@@ -363,27 +363,52 @@ function updateApiKeyUI(){
   }
 }
 
-// ── Finnhub ticker 轉換（台股加 TWSE: 前綴）──
-function toFinnhubSym(sym){
-  if(/^\d/.test(sym)) return 'TWSE:' + sym;   // 台股：2330 → TWSE:2330
-  return sym;                                    // 美股：NVDA, GOOG 直接用
+// ── 判斷是否為台股（數字開頭）──
+function isTW(sym){ return /^\d/.test(sym); }
+// 上櫃判斷：4碼數字且首字非 0，或 6 字頭
+function isOTC(sym){ return /^[3-9]\d{3}$/.test(sym) || /^6\d{3}$/.test(sym); }
+
+// ── 台股即時報價（證交所 mis API，一次查所有台股）──
+async function fetchTWSEPrices(twSyms){
+  // 每個代號組成 tse_XXXX.tw 或 otc_XXXX.tw
+  const exCh = twSyms.map(s => (isOTC(s) ? 'otc_' : 'tse_') + s + '.tw').join('|');
+  const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${encodeURIComponent(exCh)}&json=1&delay=0`;
+  const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+  const res = await fetch(proxy);
+  const json = await res.json();
+  const data = JSON.parse(json.contents);
+  const result = {};
+  if(data?.msgArray){
+    for(const item of data.msgArray){
+      const sym = item.c;           // 股票代號
+      const price = parseFloat(item.z !== '-' ? item.z : item.y); // z=成交價, y=昨收
+      const prevClose = parseFloat(item.y);
+      if(!isNaN(price) && price > 0){
+        result[sym] = {
+          price,
+          change: price - prevClose,
+          changePct: prevClose ? (price - prevClose) / prevClose * 100 : 0,
+          currency: 'TWD'
+        };
+      }
+    }
+  }
+  return result;
 }
 
-// ── 抓單一股票現價（Finnhub REST API，支援瀏覽器 CORS）──
-async function fetchPrice(sym){
+// ── 美股現價（Finnhub）──
+async function fetchUSPrice(sym){
   if(!FINNHUB_KEY) throw new Error('no_key');
-  const fsym = toFinnhubSym(sym);
-  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(fsym)}&token=${FINNHUB_KEY}`;
+  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(sym)}&token=${FINNHUB_KEY}`;
   const res = await fetch(url);
   if(!res.ok) throw new Error(`HTTP ${res.status}`);
   const d = await res.json();
-  // d.c = current price, d.pc = previous close, d.d = change, d.dp = change%
   if(!d.c || d.c === 0) throw new Error('no price');
   return {
     price: d.c,
     change: d.d ?? (d.c - d.pc),
     changePct: d.dp ?? 0,
-    currency: /^\d/.test(sym) ? 'TWD' : 'USD'
+    currency: 'USD'
   };
 }
 
@@ -391,11 +416,7 @@ async function fetchPrice(sym){
 async function fetchAllPrices(){
   const {holdings} = computeHoldings();
   if(!holdings.length) return;
-  if(!FINNHUB_KEY){
-    showToast('⚠ 請先設定 Finnhub API Key');
-    document.getElementById('apikey-input').focus();
-    return;
-  }
+
   const btn = document.getElementById('refresh-btn');
   const icon = document.getElementById('refresh-icon');
   btn.disabled = true;
@@ -403,22 +424,39 @@ async function fetchAllPrices(){
   icon.className = 'spin';
   showToast('抓取報價中...');
 
-  const results = await Promise.allSettled(
-    holdings.map(h => fetchPrice(h.sym).then(r => ({sym: h.sym, ...r})))
-  );
+  const twSyms = holdings.map(h=>h.sym).filter(isTW);
+  const usSyms = holdings.map(h=>h.sym).filter(s=>!isTW(s));
 
   let ok = 0, fail = 0;
-  results.forEach((r, i) => {
-    const sym = holdings[i].sym;
-    if(r.status === 'fulfilled'){
-      livePrices[sym] = r.value;
-      ok++;
-    } else {
-      livePriceErrors[sym] = true;
-      fail++;
-      console.warn(`抓取 ${sym} 失敗:`, r.reason?.message);
+
+  // 台股：一次全抓
+  if(twSyms.length){
+    try{
+      const twPrices = await fetchTWSEPrices(twSyms);
+      for(const sym of twSyms){
+        if(twPrices[sym]){ livePrices[sym] = twPrices[sym]; ok++; }
+        else { livePriceErrors[sym] = true; fail++; console.warn(`台股 ${sym} 無資料`); }
+      }
+    } catch(e){
+      for(const sym of twSyms){ livePriceErrors[sym] = true; fail++; }
+      console.warn('台股抓取失敗:', e.message);
     }
-  });
+  }
+
+  // 美股：需要 Finnhub Key
+  if(usSyms.length){
+    if(!FINNHUB_KEY){
+      for(const sym of usSyms){ livePriceErrors[sym] = true; fail++; }
+      showToast('⚠ 美股需要 Finnhub API Key');
+    } else {
+      const usResults = await Promise.allSettled(usSyms.map(s => fetchUSPrice(s)));
+      usResults.forEach((r, i) => {
+        const sym = usSyms[i];
+        if(r.status === 'fulfilled'){ livePrices[sym] = r.value; ok++; }
+        else { livePriceErrors[sym] = true; fail++; console.warn(`美股 ${sym} 失敗:`, r.reason?.message); }
+      });
+    }
+  }
 
   btn.disabled = false;
   icon.textContent = '↻';
