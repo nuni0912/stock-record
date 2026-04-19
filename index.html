@@ -174,7 +174,16 @@ tr:hover td{background:var(--surface2)}
       <div class="panel-toggle" id="holdings-toggle">▾</div>
     </div>
     <div class="panel-body" id="holdings-body">
-      <div class="section-note">💡 點「自動抓取現價」可從 Yahoo Finance 取得最新報價（台股代號會自動加 .TW）</div>
+      <div id="apikey-setup" style="background:var(--surface2);border:0.5px solid var(--border2);border-radius:var(--radius);padding:14px 16px;margin-bottom:16px">
+        <div style="font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;margin-bottom:8px">
+          🔑 <a href="https://finnhub.io/register" target="_blank" style="color:var(--accent);text-decoration:none">finnhub.io</a> 免費註冊取得 API Key，貼入後即可自動抓取現價
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="text" id="apikey-input" placeholder="貼上你的 Finnhub API Key..." style="flex:1;font-size:12px;padding:7px 10px">
+          <button onclick="saveApiKey()" style="padding:7px 14px;border-radius:var(--radius);border:none;background:var(--accent);color:#fff;font-family:'DM Mono',monospace;font-size:12px;cursor:pointer;white-space:nowrap">儲存</button>
+        </div>
+        <div id="apikey-status" style="font-size:11px;margin-top:6px;font-family:'DM Mono',monospace;color:var(--text3)">尚未設定 API Key</div>
+      </div>
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
         <button class="btn-refresh" id="refresh-btn" onclick="fetchAllPrices()">
           <span id="refresh-icon">↻</span> 自動抓取現價
